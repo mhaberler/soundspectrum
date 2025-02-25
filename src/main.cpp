@@ -1,140 +1,204 @@
-#include <Arduino.h>     // M5Unified for M5AtomS3U support
-// #include <driver/i2s.h>    // ESP32 I2S driver
-#include "ESP_I2S.h"
-#include "arduinoFFT.h"    // arduinoFFT library by kosme
-#include "TimerStats.hpp"
-#include <math.h>          // For log and exp
+#include <M5StickCPlus2.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "arduinoFFT.h"
 
-// I2S pin definitions https://docs.m5stack.com/en/core/AtomS3U
-#if defined(ARDUINO_M5Stick_C)
-    #define I2S_SD  34         // Data (DOUT from codec)
-    #define I2S_SCK 0         // Bit Clock (BCLK)
-#endif
-#if defined(ARDUINO_ATOMS3U)
-    #define I2S_SD  38          // Data (DOUT from codec)
-    #define I2S_SCK 39         // Bit Clock (BCLK)
-#endif
+// Copyright 2024 Adam Carlin
 
-#define SAMPLE_RATE 16000  // 16 kHz sample rate (ES7210 supports up to 48 kHz)
-#define SAMPLES 256*8        // FFT sample size (power of 2)
-#define BUFFER_SIZE (SAMPLES * 2) // 16-bit samples, mono
-char buffer[BUFFER_SIZE];
-size_t bytes_read;
+const uint16_t samples = 1024;
+const double samplingFrequency = 44100;
 
-TimerStats tsFft;
+double vReal[samples];
+double vImag[samples];
+ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, samples, samplingFrequency);
 
-I2SClass i2s;
+// A-weighting filter coefficients
+const double aWeightingCoefficients[] = {
+    -85.4, -77.4, -69.4, -61.4, -53.4, -45.4, -37.4, -29.4, -21.4, -13.4,
+    -5.4, 2.6, 10.6, 18.6, 26.6, 34.6, 42.6, 50.6, 58.6, 66.6,
+    74.6, 82.6, 90.6, 98.6, 106.6, 114.6, 122.6, 130.6, 138.6, 146.6,
+    154.6, 162.6, 170.6, 178.6, 186.6, 194.6, 202.6, 210.6, 218.6, 226.6,
+    234.6, 242.6, 250.6, 258.6, 266.6, 274.6, 282.6, 290.6, 298.6, 306.6,
+    314.6, 322.6, 330.6, 338.6, 346.6, 354.6, 362.6, 370.6, 378.6, 386.6,
+    394.6, 402.6, 410.6, 418.6, 426.6, 434.6, 442.6, 450.6, 458.6, 466.6,
+    474.6, 482.6, 490.6, 498.6, 506.6, 514.6, 522.6, 530.6, 538.6, 546.6,
+    554.6, 562.6, 570.6, 578.6, 586.6, 594.6, 602.6, 610.6, 618.6, 626.6,
+    634.6, 642.6, 650.6, 658.6, 666.6, 674.6, 682.6, 690.6, 698.6, 706.6,
+    714.6, 722.6, 730.6, 738.6, 746.6, 754.6, 762.6, 770.6, 778.6, 786.6,
+    794.6, 802.6, 810.6, 818.6, 826.6, 834.6, 842.6, 850.6, 858.6, 866.6,
+    874.6, 882.6, 890.6, 898.6, 906.6, 914.6, 922.6, 930.6, 938.6, 946.6,
+    954.6, 962.6, 970.6, 978.6, 986.6, 994.6, 1002.6, 1010.6, 1018.6, 1026.6
+};
 
-// FFT setup with float
-ArduinoFFT<float> FFT = ArduinoFFT<float>();
-float vReal[SAMPLES];
-float vImag[SAMPLES];
-float samplingPeriod = 1.0 / SAMPLE_RATE;
+int ambientNoiseAdjustment = 45; // Arduino is noisy, maybe other things too, used to calibrate
+
+// Define constants for LCD dimensions
+const int LCD_WIDTH = 240;
+const int LCD_HEIGHT = 135;
+
+// Define ST7789 display commands
+#define ST7789_DISPOFF 0x28
+#define ST7789_DISPON  0x29
+
+// Prometheus endpoint configuration
+const char* prometheusEndpoint = "http://<your_ip:port_maybe>/metrics/job/sound_level_dba/instance/<room_location>";
+
+// Wi-Fi configuration
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASS;
 
 void setup() {
+    auto cfg = M5.config();
+    cfg.internal_mic = true;
+    M5.begin(cfg);
+
+    M5.Lcd.setRotation(3);
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextColor(WHITE);
+    M5.Lcd.setTextSize(2);
+
     Serial.begin(115200);
-    delay(3000);
-
-    Serial.println("M5AtomS3U FFT Demo");
-    log_w("Arduino Version: %d.%d.%d", ESP_ARDUINO_VERSION_MAJOR, ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH);
-    log_w("ESP-IDF Version: %d.%d.%d", ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH);
-
-
-    Serial.println("Initializing I2S bus...");
-    i2s.setPinsPdmRx(I2S_SCK, I2S_SD);
-
-    // Initialize the I2S bus in standard mode
-    if (!i2s.begin(I2S_MODE_PDM_RX, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
-        Serial.println("Failed to initialize I2S bus!");
-        return;
+    while (!Serial) continue;
+    Serial.println("Ready");
+#if 0
+    // StickCP2.Mic.begin();
+    // Connect to WiFi
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to WiFi...");
     }
-    Serial.println("I2S bus initialized.");
-
-    delay(100); // Stabilize hardware
-}
-
-float calculateSFM(float* spectrum, int numBins) {
-    float geomMeanLog = 0.0;
-    float arithMean = 0.0;
-    const float epsilon = 1e-6; // Avoid log(0)
-
-    for (int i = 0; i < numBins; i++) {
-        float val = spectrum[i] + epsilon;
-        geomMeanLog += log(val); // Sum of logs for geometric mean
-        arithMean += val;        // Sum for arithmetic mean
-    }
-
-    geomMeanLog /= numBins;     // Average log
-    arithMean /= numBins;       // Average magnitude
-
-    return exp(geomMeanLog - log(arithMean)); // SFM
-}
-
-float calculateSpectralSlope(float* spectrum, int numBins) {
-    float xSum = 0.0, ySum = 0.0, xySum = 0.0, x2Sum = 0.0;
-    const float epsilon = 1e-6; // Avoid log(0)
-    int n = numBins; // 128 bins (0-8 kHz)
-
-    // Precompute x sums (bin indices)
-    for (int i = 0; i < n; i++) {
-        float x = (float)i;
-        xSum += x;
-        x2Sum += x * x;
-    }
-
-    // Compute y (log-magnitude) and cross terms
-    for (int i = 0; i < n; i++) {
-        float y = log10(spectrum[i] + epsilon);
-        ySum += y;
-        xySum += (float)i * y;
-    }
-
-    // Slope via least squares
-    float numerator = n * xySum - xSum * ySum;
-    float denominator = n * x2Sum - xSum * xSum;
-    return numerator / denominator; // Slope in log10/bin units
+    Serial.println("Connected to WiFi");
+#endif
 }
 
 void loop() {
+    M5.update();
 
+    static int16_t micData[samples];
+    static int16_t dbAHistory[LCD_WIDTH];
+    static int dbAHistoryIndex = 0;
+    static uint64_t lastPushTime = 0;
 
-    // Capture audio
-    bytes_read = i2s.readBytes(buffer, BUFFER_SIZE);
-    if (bytes_read == 0) {
-        Serial.println("Failed to read I2S data");
-        return;
+    // Read microphone data
+    if (StickCP2.Mic.record(micData, samples, samplingFrequency)) {
+        for (int i = 0; i < samples; i++) {
+            vReal[i] = micData[i];
+            vImag[i] = 0;
+        }
+
+        FFT.dcRemoval();
+        FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+        FFT.compute(FFTDirection::Forward);
+        FFT.complexToMagnitude();
+
+        // Apply A-weighting filter
+        for (int i = 0; i < samples / 2; i++) {
+            double frequency = (i * 1.0 * samplingFrequency) / samples;
+            int index = static_cast<int>(frequency / (samplingFrequency / 2) * 120);
+            if (index >= 0 && index < 120) {
+                vReal[i] += aWeightingCoefficients[index];
+            }
+        }
+
+        // Find the maximum magnitude after applying A-weighting
+        double maxMagnitude = 0;
+        for (int i = 0; i < samples / 2; i++) {
+            if (vReal[i] > maxMagnitude) {
+                maxMagnitude = vReal[i];
+            }
+        }
+
+        double decibels = abs((20 * log10(maxMagnitude)) - ambientNoiseAdjustment);
+
+        if (isnan(decibels)) {
+            decibels = 0;
+        }
+
+        // Update dBA history buffer
+        dbAHistory[dbAHistoryIndex++] = decibels;
+        if (dbAHistoryIndex >= LCD_WIDTH) {
+            dbAHistoryIndex = 0;
+        }
+
+        // Display dBA and AN values on a single line
+        M5.Lcd.fillScreen(BLACK);
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.printf("dBA: %.2f | AN: %d", decibels, ambientNoiseAdjustment);
+
+        // Define maximum graph dimensions
+        const int maxGraphWidth = 240; // Adjusted for rotated display width
+        const int maxGraphHeight = 135; // Adjusted for rotated display height
+
+        // Calculate margins dynamically to fit within bounds
+        const int bottomMargin = 25; // Space for x-axis labels, reduced to fit
+        const int topMargin = 20; // Space for top margin, keeping consistent
+        const int effectiveGraphWidth = maxGraphWidth;
+        const int effectiveGraphHeight = maxGraphHeight - bottomMargin - topMargin;
+
+        // Draw X-axis line
+        M5.Lcd.drawLine(0, maxGraphHeight - bottomMargin, maxGraphWidth, maxGraphHeight - bottomMargin, WHITE);
+
+        // Center "Time" label beneath the graph
+        String timeLabel = "Time";
+        int timeLabelWidth = 6 * timeLabel.length(); // Approximate width of the label, assuming 6 pixels per character
+        M5.Lcd.setCursor((maxGraphWidth - timeLabelWidth) / 2, maxGraphHeight - bottomMargin + 5); // Centering the label
+        M5.Lcd.print(timeLabel);
+
+        // Draw line graph of dBA history
+        for (int i = 0; i < effectiveGraphWidth; i++) {
+            int index = (dbAHistoryIndex + i) % effectiveGraphWidth;
+            int dBAValue = constrain(dbAHistory[index], 0, 140);
+            int y = map(dBAValue, 0, 140, maxGraphHeight - bottomMargin - 1, topMargin + 1);
+            M5.Lcd.drawPixel(i, y, WHITE);
+        }
+
+        Serial.print("dBA: ");
+        Serial.print(decibels);
+        Serial.print(", AN: ");
+        Serial.println(ambientNoiseAdjustment);
+
+#if 0
+        // Send dBA to Prometheus Pushgateway every 1 second
+        if (millis() - lastPushTime >= 1000) {
+            if (WiFi.status() == WL_CONNECTED) {
+                HTTPClient http;
+                http.begin(prometheusEndpoint);
+                http.addHeader("Content-Type", "text/plain");
+
+                String payload = "sound_level_dba " + String(decibels) + "\n";
+                int httpResponseCode = http.POST(payload);
+
+                if (httpResponseCode == 200) {
+                    Serial.println("Data " + String(decibels) + " pushed to Prometheus Pushgateway");
+                } else {
+                    Serial.print("Error pushing data to Prometheus Pushgateway. Response code: ");
+                    Serial.println(httpResponseCode);
+                }
+
+                http.end();
+            }
+            lastPushTime = millis();
+        }
+#endif
     }
 
-    // Convert to float for FFT
-    for (int i = 0; i < SAMPLES; i++) {
-        vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
-        //vReal[i] = buffer[i] / 32768.0 * 128;  // Normalize to [-128, 127]
-        vImag[i] = 0.0;
+    // Adjust ambient noise factor using buttons
+    if (M5.BtnA.wasPressed() && !M5.BtnA.wasDoubleClicked()) {
+        ambientNoiseAdjustment--;
+    } else if (M5.BtnB.wasPressed()) {
+        ambientNoiseAdjustment++;
     }
-    tsFft.Start();
-    // Perform FFT
-    FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-    FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
-    FFT.complexToMagnitude(vReal, vImag, SAMPLES);
-    tsFft.Stop();
 
-    // Get peak frequency
-    float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
-
-    float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
-    float slope = calculateSpectralSlope(vReal, SAMPLES / 2); // First 128 bins
-
-    // Output to Serial console
-    Serial.printf("Peak Frequency: %.1f Hz, SFM: %.2f slope = %f", peakFreq, sfm, slope); // tsFft.Mean());
-    // Classify based on slope
-    if (fabs(slope) < 0.005) {
-        Serial.println(" - White Noise (flat)");
-    } else if (slope < -0.01 && slope > -0.05) {
-        Serial.println(" - Pink Noise (~3 dB/octave)");
-    } else if (slope < -0.05) {
-        Serial.println(" - Brown Noise (~6 dB/octave)");
-    } else {
-        Serial.println(" - Likely Signal (variable slope)");
+    // Turn off display on double click of button A
+    if (M5.BtnA.wasDoubleClicked()) {
+        M5.Lcd.writecommand(ST7789_DISPOFF);
     }
-    delay(1); // Control update rate
+
+    // Turn on display on any button press
+    if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed()) {
+        M5.Lcd.writecommand(ST7789_DISPON);
+    }
+
+    delay(100);
 }
