@@ -70,30 +70,30 @@ float calculateSFM(float* spectrum, int numBins) {
     return exp(geomMeanLog - log(arithMean)); // SFM
 }
 
-float calculateSpectralSlope(float* spectrum, int numBins) {
-    float xSum = 0.0, ySum = 0.0, xySum = 0.0, x2Sum = 0.0;
-    const float epsilon = 1e-6; // Avoid log(0)
-    int n = numBins; // 128 bins (0-8 kHz)
+// float calculateSpectralSlope(float* spectrum, int numBins) {
+//     float xSum = 0.0, ySum = 0.0, xySum = 0.0, x2Sum = 0.0;
+//     const float epsilon = 1e-6; // Avoid log(0)
+//     int n = numBins; // 128 bins (0-8 kHz)
 
-    // Precompute x sums (bin indices)
-    for (int i = 0; i < n; i++) {
-        float x = (float)i;
-        xSum += x;
-        x2Sum += x * x;
-    }
+//     // Precompute x sums (bin indices)
+//     for (int i = 0; i < n; i++) {
+//         float x = (float)i;
+//         xSum += x;
+//         x2Sum += x * x;
+//     }
 
-    // Compute y (log-magnitude) and cross terms
-    for (int i = 0; i < n; i++) {
-        float y = log10(spectrum[i] + epsilon);
-        ySum += y;
-        xySum += (float)i * y;
-    }
+//     // Compute y (log-magnitude) and cross terms
+//     for (int i = 0; i < n; i++) {
+//         float y = log10(spectrum[i] + epsilon);
+//         ySum += y;
+//         xySum += (float)i * y;
+//     }
 
-    // Slope via least squares
-    float numerator = n * xySum - xSum * ySum;
-    float denominator = n * x2Sum - xSum * xSum;
-    return numerator / denominator; // Slope in log10/bin units
-}
+//     // Slope via least squares
+//     float numerator = n * xySum - xSum * ySum;
+//     float denominator = n * x2Sum - xSum * xSum;
+//     return numerator / denominator; // Slope in log10/bin units
+// }
 
 void loop() {
 
@@ -113,21 +113,33 @@ void loop() {
     }
     tsFft.Start();
     // Perform FFT
+    FFT.dcRemoval();
     FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
     FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
     FFT.complexToMagnitude(vReal, vImag, SAMPLES);
     tsFft.Stop();
 
+    // Find the maximum magnitude
+    double maxMagnitude = 0;
+    for (int i = 0; i < SAMPLES / 2; i++) {
+        if (vReal[i] > maxMagnitude) {
+            maxMagnitude = vReal[i];
+        }
+    }
+
     // Get peak frequency
     float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
 
     float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
-    float slope = calculateSpectralSlope(vReal, SAMPLES / 2); // First 128 bins
+    // float slope = calculateSpectralSlope(vReal, SAMPLES / 2); // First 128 bins
+
     Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
-    Serial.printf(">slope:%f\n", slope);
+    // Serial.printf(">slope:%f\n", slope);
     Serial.printf(">sfm:%f\n", sfm);
+    Serial.printf(">fft_time:%f\n", tsFft.Mean());
+    Serial.printf(">max_mag:%f\n", maxMagnitude);
 
-
+    
 #define FREQ_LOW 150
 #define FREQ_HIGH 250
 
