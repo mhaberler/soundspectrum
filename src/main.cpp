@@ -16,7 +16,7 @@
 #endif
 
 #define SAMPLE_RATE 16000  // 16 kHz sample rate (ES7210 supports up to 48 kHz)
-#define SAMPLES 256*8        // FFT sample size (power of 2)
+#define SAMPLES 256 *8      // FFT sample size (power of 2)
 #define BUFFER_SIZE (SAMPLES * 2) // 16-bit samples, mono
 char buffer[BUFFER_SIZE];
 size_t bytes_read;
@@ -44,7 +44,7 @@ void setup() {
     i2s.setPinsPdmRx(I2S_SCK, I2S_SD);
 
     // Initialize the I2S bus in standard mode
-    if (!i2s.begin(I2S_MODE_PDM_RX, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
+    if (!i2s.begin(I2S_MODE_PDM_RX, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
         Serial.println("Failed to initialize I2S bus!");
         return;
     }
@@ -123,18 +123,38 @@ void loop() {
 
     float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
     float slope = calculateSpectralSlope(vReal, SAMPLES / 2); // First 128 bins
+    Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
+    Serial.printf(">slope:%f\n", slope);
+    Serial.printf(">sfm:%f\n", sfm);
 
-    // Output to Serial console
-    Serial.printf("Peak Frequency: %.1f Hz, SFM: %.2f slope = %f", peakFreq, sfm, slope); // tsFft.Mean());
-    // Classify based on slope
-    if (fabs(slope) < 0.005) {
-        Serial.println(" - White Noise (flat)");
-    } else if (slope < -0.01 && slope > -0.05) {
-        Serial.println(" - Pink Noise (~3 dB/octave)");
-    } else if (slope < -0.05) {
-        Serial.println(" - Brown Noise (~6 dB/octave)");
-    } else {
-        Serial.println(" - Likely Signal (variable slope)");
-    }
+
+#define FREQ_LOW 150
+#define FREQ_HIGH 250
+
+#define SFM_LOW 0.45
+#define SFM_HIGH 0.7
+
+    bool p1 = (peakFreq > FREQ_LOW) && (peakFreq < FREQ_HIGH);
+    bool p2 = (sfm > SFM_LOW) && (sfm < SFM_HIGH);
+    bool burner = p1 && p2;
+
+    Serial.printf(">p1:%d\n", p1);
+    Serial.printf(">p2:%d\n", p2);
+    Serial.printf(">p3:%d\n", burner);
+
+    // peak 150-250
+    // sfm 0.45 - 0.7
+    // // Output to Serial console
+    // Serial.printf("Peak Frequency: %.1f Hz, SFM: %.2f slope = %f", peakFreq, sfm, slope); // tsFft.Mean());
+    // // Classify based on slope
+    // if (fabs(slope) < 0.005) {
+    //     Serial.println(" - White Noise (flat)");
+    // } else if (slope < -0.01 && slope > -0.05) {
+    //     Serial.println(" - Pink Noise (~3 dB/octave)");
+    // } else if (slope < -0.05) {
+    //     Serial.println(" - Brown Noise (~6 dB/octave)");
+    // } else {
+    //     Serial.println(" - Likely Signal (variable slope)");
+    // }
     delay(1); // Control update rate
 }
