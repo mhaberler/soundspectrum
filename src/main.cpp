@@ -18,12 +18,22 @@
 #define SAMPLE_RATE 16000  // 16 kHz sample rate (ES7210 supports up to 48 kHz)
 #define SAMPLES 256 *8      // FFT sample size (power of 2)
 #define BUFFER_SIZE (SAMPLES * 2) // 16-bit samples, mono
+
+#define NUM_BINS (SAMPLES / 2) // 128 bins (0-8 kHz)
+
+// Button pin for M5Stick-C
+#define BUTTON_PIN 37
+
 char buffer[BUFFER_SIZE];
 size_t bytes_read;
 
 TimerStats tsFft;
 
 I2SClass i2s;
+
+// Buffer to store recorded sample spectrum
+float recordedSample[NUM_BINS] = {0};
+bool sampleRecorded = false;
 
 // FFT setup with float
 ArduinoFFT<float> FFT = ArduinoFFT<float>();
@@ -39,6 +49,8 @@ void setup() {
     log_w("Arduino Version: %d.%d.%d", ESP_ARDUINO_VERSION_MAJOR, ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH);
     log_w("ESP-IDF Version: %d.%d.%d", ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH);
 
+    // Initialize button
+    pinMode(BUTTON_PIN, INPUT_PULLUP); // Active LOW on M5Stick-C
 
     Serial.println("Initializing I2S bus...");
     i2s.setPinsPdmRx(I2S_SCK, I2S_SD);
@@ -70,33 +82,62 @@ float calculateSFM(float* spectrum, int numBins) {
     return exp(geomMeanLog - log(arithMean)); // SFM
 }
 
-// float calculateSpectralSlope(float* spectrum, int numBins) {
-//     float xSum = 0.0, ySum = 0.0, xySum = 0.0, x2Sum = 0.0;
-//     const float epsilon = 1e-6; // Avoid log(0)
-//     int n = numBins; // 128 bins (0-8 kHz)
 
-//     // Precompute x sums (bin indices)
-//     for (int i = 0; i < n; i++) {
-//         float x = (float)i;
-//         xSum += x;
-//         x2Sum += x * x;
-//     }
+// Record a sample into the buffer
+void recordSample() {
+    char buffer[BUFFER_SIZE];
+    size_t bytes_read;
 
-//     // Compute y (log-magnitude) and cross terms
-//     for (int i = 0; i < n; i++) {
-//         float y = log10(spectrum[i] + epsilon);
-//         ySum += y;
-//         xySum += (float)i * y;
-//     }
+    Serial.println("Recording sample...");
 
-//     // Slope via least squares
-//     float numerator = n * xySum - xSum * ySum;
-//     float denominator = n * x2Sum - xSum * xSum;
-//     return numerator / denominator; // Slope in log10/bin units
-// }
+    // i2s_read(I2S_NUM_0, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
+
+    bytes_read = i2s.readBytes(buffer, BUFFER_SIZE);
+
+    for (int i = 0; i < SAMPLES; i++) {
+        vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
+        vImag[i] = 0.0;
+    }
+
+    FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
+    FFT.complexToMagnitude(vReal, vImag, SAMPLES);
+
+    memcpy(recordedSample, vReal, NUM_BINS * sizeof(float));
+    sampleRecorded = true;
+
+    Serial.println("Sample recorded.");
+}
+
+// Spectral Angle Mapping (returns angle in radians)
+float spectralAngle(float* spectrum1, float* spectrum2, int len) {
+    float dotProduct = 0.0, norm1 = 0.0, norm2 = 0.0;
+    const float epsilon = 1e-6;
+
+    for (int i = 0; i < len; i++) {
+        dotProduct += spectrum1[i] * spectrum2[i];
+        norm1 += spectrum1[i] * spectrum1[i];
+        norm2 += spectrum2[i] * spectrum2[i];
+    }
+
+    norm1 = sqrt(norm1);
+    norm2 = sqrt(norm2);
+    float cosTheta = (norm1 > epsilon && norm2 > epsilon) ? dotProduct / (norm1 * norm2) : 0.0;
+
+    if (cosTheta > 1.0) cosTheta = 1.0;
+    if (cosTheta < -1.0) cosTheta = -1.0;
+
+    return acos(cosTheta);
+}
+
 
 void loop() {
 
+    // Check button press to record sample
+    if (digitalRead(BUTTON_PIN) == LOW && !sampleRecorded) {
+        recordSample();
+        delay(100); // Debounce
+    }
 
     // Capture audio
     bytes_read = i2s.readBytes(buffer, BUFFER_SIZE);
@@ -104,42 +145,38 @@ void loop() {
         Serial.println("Failed to read I2S data");
         return;
     }
-
+    tsFft.Start();
     // Convert to float for FFT
     for (int i = 0; i < SAMPLES; i++) {
         vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
         //vReal[i] = buffer[i] / 32768.0 * 128;  // Normalize to [-128, 127]
         vImag[i] = 0.0;
     }
-    tsFft.Start();
+
     // Perform FFT
     FFT.dcRemoval();
     FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
     FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
     FFT.complexToMagnitude(vReal, vImag, SAMPLES);
-    tsFft.Stop();
 
-    // Find the maximum magnitude
-    double maxMagnitude = 0;
-    for (int i = 0; i < SAMPLES / 2; i++) {
-        if (vReal[i] > maxMagnitude) {
-            maxMagnitude = vReal[i];
-        }
-    }
 
     // Get peak frequency
     float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
 
     float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
-    // float slope = calculateSpectralSlope(vReal, SAMPLES / 2); // First 128 bins
+
+    tsFft.Stop();
+
+    // SAM comparison with recorded sample (if available)
+    float angle = sampleRecorded ? spectralAngle(vReal, recordedSample, NUM_BINS) : M_PI;
 
     Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
     // Serial.printf(">slope:%f\n", slope);
     Serial.printf(">sfm:%f\n", sfm);
+    Serial.printf(">sam:%f\n", sfm);
     Serial.printf(">fft_time:%f\n", tsFft.Mean());
-    Serial.printf(">max_mag:%f\n", maxMagnitude);
 
-    
+
 #define FREQ_LOW 150
 #define FREQ_HIGH 250
 
