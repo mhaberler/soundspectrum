@@ -1,0 +1,81 @@
+{
+   "widgets": [
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 4,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "peak_freq",
+               "sourceNames": [
+                  "peak_freq"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "peak_freq",
+                  "_id": "data-serie-6",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "unit": "Hz",
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 3,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "p3",
+               "sourceNames": [
+                  "p3"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "p3",
+                  "_id": "data-serie-10",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 4,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "max_mag",
+               "sourceNames": [
+                  "max_mag"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "max_mag",
+                  "_id": "data-serie-12",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      }
+   ],
+   "viewDuration": "300"
+}
