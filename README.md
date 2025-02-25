@@ -28,8 +28,15 @@ https://github.com/blissend/sound_level_dba/
 
 any M5Stick-C
 
-# similar projects
+# related projects
 https://github.com/m5stack/M5-ProductExampleCodes/blob/master/Unit/PDM/PDM.ino
+https://github.com/eggfly/CloveCardComputer/blob/2059ddbabd9a7ba951b062c7270596089fca97ca/CloveV2/FactoryTest/src/PDM_SPM1423.cpp
+https://github.com/m5stack/M5StickC/blob/202fddddf05d878381f3b4d5bfa6b6e70031a290/examples/Basics/Micophone/Micophone.ino
+https://github.com/esikora/M5StickC_AudioVisLed
+
+
+https://github.com/enriqqqq/guardiband?tab=readme-ov-file
+https://github.com/enriqqqq/cough_detection
 
 
 
