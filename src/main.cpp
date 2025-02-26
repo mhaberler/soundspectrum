@@ -5,14 +5,27 @@
 #include "TimerStats.hpp"
 #include <math.h>          // For log and exp
 
+#if defined(WS2812_LED_PIN)
+    #include <FastLED.h>
+    #define NUM_LEDS    1   // Number of LEDs (adjust as needed)
+    #define LED_TYPE    WS2812
+    #define COLOR_ORDER GRB
+
+    CRGB leds[NUM_LEDS];
+#endif
+
 // I2S pin definitions https://docs.m5stack.com/en/core/AtomS3U
 #if defined(ARDUINO_M5Stick_C)
     #define I2S_SD  34         // Data (DOUT from codec)
     #define I2S_SCK 0         // Bit Clock (BCLK)
+    // Button pin for M5Stick-C
+    #define BUTTON_PIN 37
 #endif
 #if defined(ARDUINO_ATOMS3U)
     #define I2S_SD  38          // Data (DOUT from codec)
     #define I2S_SCK 39         // Bit Clock (BCLK)
+    // Button pin for M5Stick-C
+    #define BUTTON_PIN 41
 #endif
 
 #define SAMPLE_RATE 16000  // 16 kHz sample rate (ES7210 supports up to 48 kHz)
@@ -21,8 +34,7 @@
 
 #define NUM_BINS (SAMPLES / 2) // 128 bins (0-8 kHz)
 
-// Button pin for M5Stick-C
-#define BUTTON_PIN 37
+
 
 char buffer[BUFFER_SIZE];
 size_t bytes_read;
@@ -41,6 +53,28 @@ float vReal[SAMPLES];
 float vImag[SAMPLES];
 float samplingPeriod = 1.0 / SAMPLE_RATE;
 
+#if defined(WS2812_LED_PIN)
+
+void setRainbowColor(float value) {
+    // Map value (0-3) to hue (0-255) for rainbow effect
+    uint8_t hue = map(value * 100, 0, 300, 0, 255); // Scale 0-3 to 0-255 hue
+    leds[0] = CHSV(hue, 255, 255); // Full saturation and brightness
+}
+
+void led_setup() {
+    FastLED.addLeds<LED_TYPE, WS2812_LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+    FastLED.setBrightness(50); // Set brightness (0-255, adjust as needed)
+}
+
+void led_update(float value) {
+    setRainbowColor(value);
+    FastLED.show();
+}
+#else
+void led_setup() {}
+void led_update(float v) {}
+#endif
+
 void setup() {
     Serial.begin(115200);
     delay(3000);
@@ -51,6 +85,8 @@ void setup() {
 
     // Initialize button
     pinMode(BUTTON_PIN, INPUT_PULLUP); // Active LOW on M5Stick-C
+
+    led_setup();
 
     Serial.println("Initializing I2S bus...");
     i2s.setPinsPdmRx(I2S_SCK, I2S_SD);
@@ -209,7 +245,7 @@ void loop() {
     float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW,FREQ_HIGH );
     float sfm_weight = gaussianWeight(sfm, SFM_LOW, SFM_HIGH);
     float sam_weight = gaussianWeight(angle, SAM_LOW, SAM_HIGH);
-    
+
     float weight_product = peak_freq_weight * sfm_weight * sam_weight;
     float weight_sum = peak_freq_weight + sfm_weight + sam_weight;
 
@@ -219,6 +255,7 @@ void loop() {
     Serial.printf(">weight_product:%f\n", weight_product);
     Serial.printf(">weight_sum:%f\n", weight_sum);
 
+    led_update(sfm * 10);
 
     // bool p1 = (peakFreq > FREQ_LOW) && (peakFreq < FREQ_HIGH);
     // bool p2 = (sfm > SFM_LOW) && (sfm < SFM_HIGH);
