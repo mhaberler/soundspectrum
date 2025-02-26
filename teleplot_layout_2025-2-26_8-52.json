@@ -1,0 +1,81 @@
+{
+   "widgets": [
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "peak_freq",
+               "sourceNames": [
+                  "peak_freq"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "peak_freq",
+                  "_id": "data-serie-7",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "unit": "Hz",
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "sfm",
+               "sourceNames": [
+                  "sfm"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "sfm",
+                  "_id": "data-serie-8",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      },
+      {
+         "type": "chart",
+         "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 0
+         },
+         "series": [
+            {
+               "name": "sam",
+               "sourceNames": [
+                  "sam"
+               ],
+               "formula": "",
+               "options": {
+                  "_serie": "sam",
+                  "_id": "data-serie-9",
+                  "stroke": "rgba(231,76,60,1)",
+                  "fill": "rgba(231,76,60,0.1)"
+               },
+               "type": "number"
+            }
+         ]
+      }
+   ],
+   "viewDuration": "300"
+}
