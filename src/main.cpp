@@ -130,6 +130,27 @@ float spectralAngle(float* spectrum1, float* spectrum2, int len) {
     return acos(cosTheta);
 }
 
+float gaussianWeight(float x, float lowerBound, float upperBound) {
+    // Calculate the center (mean)
+    float mu = (lowerBound + upperBound) / 2.0;
+
+    // Calculate k (distance from center to bounds)
+    float k = upperBound - mu; // Assumes upperBound > lowerBound
+
+    // // Calculate sigma based on w(L) = w(U) = 0.01
+    // float sigma = k / sqrt(2.0 * 4.60517018599); // ln(0.01) = -4.605...
+
+    // Calculate sigma based on w(L) = w(U) = 0.1
+    double sigma = k / sqrt(2.0 * 2.30258509299); // ln(0.1) = -2.302585...
+
+
+
+    // Calculate the Gaussian weight: exp(-((x - mu)^2) / (2 * sigma^2))
+    float exponent = -pow(x - mu, 2) / (2.0 * pow(sigma, 2));
+    float weight = exp(exponent);
+
+    return weight;
+}
 
 void loop() {
 
@@ -173,9 +194,8 @@ void loop() {
     Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
     // Serial.printf(">slope:%f\n", slope);
     Serial.printf(">sfm:%f\n", sfm);
-    Serial.printf(">sam:%f\n", sfm);
+    Serial.printf(">sam:%f\n", angle);
     Serial.printf(">fft_time:%f\n", tsFft.Mean());
-
 
 #define FREQ_LOW 150
 #define FREQ_HIGH 250
@@ -183,13 +203,30 @@ void loop() {
 #define SFM_LOW 0.45
 #define SFM_HIGH 0.7
 
-    bool p1 = (peakFreq > FREQ_LOW) && (peakFreq < FREQ_HIGH);
-    bool p2 = (sfm > SFM_LOW) && (sfm < SFM_HIGH);
-    bool burner = p1 && p2;
+#define SAM_LOW 0.7
+#define SAM_HIGH 1.0
 
-    Serial.printf(">p1:%d\n", p1);
-    Serial.printf(">p2:%d\n", p2);
-    Serial.printf(">p3:%d\n", burner);
+    float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW,FREQ_HIGH );
+    float sfm_weight = gaussianWeight(sfm, SFM_LOW, SFM_HIGH);
+    float sam_weight = gaussianWeight(angle, SAM_LOW, SAM_HIGH);
+    
+    float weight_product = peak_freq_weight * sfm_weight * sam_weight;
+    float weight_sum = peak_freq_weight + sfm_weight + sam_weight;
+
+    Serial.printf(">peak_freq_weight:%f\n", peak_freq_weight);
+    Serial.printf(">sfm_weight:%f\n", sfm_weight);
+    Serial.printf(">sam_weight:%f\n", sam_weight);
+    Serial.printf(">weight_product:%f\n", weight_product);
+    Serial.printf(">weight_sum:%f\n", weight_sum);
+
+
+    // bool p1 = (peakFreq > FREQ_LOW) && (peakFreq < FREQ_HIGH);
+    // bool p2 = (sfm > SFM_LOW) && (sfm < SFM_HIGH);
+    // bool burner = p1 && p2;
+
+    // Serial.printf(">p1:%d\n", p1);
+    // Serial.printf(">p2:%d\n", p2);
+    // Serial.printf(">p3:%d\n", burner);
 
     // peak 150-250
     // sfm 0.45 - 0.7
