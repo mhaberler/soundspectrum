@@ -1,6 +1,5 @@
-#include <Arduino.h>     // M5Unified for M5AtomS3U support
-// #include <driver/i2s.h>    // ESP32 I2S driver
-#include "ESP_I2S.h"
+#include <Arduino.h>       // M5Unified for M5AtomS3U support
+#include <driver/i2s_pdm.h> // Modern ESP-IDF I2S PDM driver
 #include "arduinoFFT.h"    // arduinoFFT library by kosme
 #include "TimerStats.hpp"
 #include <math.h>          // For log and exp
@@ -10,38 +9,32 @@
     #define NUM_LEDS    1   // Number of LEDs (adjust as needed)
     #define LED_TYPE    WS2812
     #define COLOR_ORDER GRB
-
     CRGB leds[NUM_LEDS];
 #endif
 
 // I2S pin definitions https://docs.m5stack.com/en/core/AtomS3U
 #if defined(ARDUINO_M5Stick_C)
-    #define I2S_SD  34         // Data (DOUT from codec)
-    #define I2S_SCK 0         // Bit Clock (BCLK)
-    // Button pin for M5Stick-C
-    #define BUTTON_PIN 37
+    #define I2S_SD  GPIO_NUM_34 // Data (DOUT from codec)
+    #define I2S_SCK GPIO_NUM_0  // Bit Clock (BCLK)
+    #define BUTTON_PIN GPIO_NUM_37
 #endif
 #if defined(ARDUINO_ATOMS3U)
-    #define I2S_SD  38          // Data (DOUT from codec)
-    #define I2S_SCK 39         // Bit Clock (BCLK)
-    // Button pin for M5Stick-C
-    #define BUTTON_PIN 41
+    #define I2S_SD  GPIO_NUM_38 // Data (DOUT from codec)
+    #define I2S_SCK GPIO_NUM_39 // Bit Clock (BCLK)
+    #define BUTTON_PIN GPIO_NUM_41
 #endif
 
 #define SAMPLE_RATE 16000  // 16 kHz sample rate (ES7210 supports up to 48 kHz)
-#define SAMPLES 256 *8      // FFT sample size (power of 2)
+#define SAMPLES 256 * 8    // FFT sample size (power of 2)
 #define BUFFER_SIZE (SAMPLES * 2) // 16-bit samples, mono
-
 #define NUM_BINS (SAMPLES / 2) // 128 bins (0-8 kHz)
 
-
+#define I2S_PORT I2S_NUM_0 // Use I2S port 0
 
 char buffer[BUFFER_SIZE];
 size_t bytes_read;
 
 TimerStats tsFft;
-
-I2SClass i2s;
 
 // Buffer to store recorded sample spectrum
 float recordedSample[NUM_BINS] = {0};
@@ -53,10 +46,11 @@ float vReal[SAMPLES];
 float vImag[SAMPLES];
 float samplingPeriod = 1.0 / SAMPLE_RATE;
 
-#if defined(WS2812_LED_PIN)
+// Global I2S channel handle
+static i2s_chan_handle_t rx_handle = NULL;
 
+#if defined(WS2812_LED_PIN)
 void setRainbowColor(float value) {
-    // Map value (0-3) to hue (0-255) for rainbow effect
     uint8_t hue = map(value * 100, 0, 300, 0, 255); // Scale 0-3 to 0-255 hue
     leds[0] = CHSV(hue, 255, 255); // Full saturation and brightness
 }
@@ -75,6 +69,44 @@ void led_setup() {}
 void led_update(float v) {}
 #endif
 
+void i2s_setup() {
+    // PDM RX channel configuration
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
+
+    // PDM RX specific configuration
+    i2s_pdm_rx_config_t pdm_rx_cfg = {
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .clk = I2S_SCK,         // PDM clock pin
+            .din = I2S_SD,          // PDM data in pin
+            .invert_flags = {
+                .clk_inv = false    // No inversion for PDM clock
+            }
+        }
+    };
+
+    // Initialize the RX channel
+    if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) {
+        Serial.println("Failed to create I2S channel!");
+        return;
+    }
+
+    // Initialize PDM RX mode
+    if (i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg) != ESP_OK) {
+        Serial.println("Failed to initialize PDM RX mode!");
+        return;
+    }
+
+    // Enable the RX channel
+    if (i2s_channel_enable(rx_handle) != ESP_OK) {
+        Serial.println("Failed to enable I2S RX channel!");
+        return;
+    }
+
+    Serial.println("I2S PDM RX bus initialized.");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(3000);
@@ -89,14 +121,7 @@ void setup() {
     led_setup();
 
     Serial.println("Initializing I2S bus...");
-    i2s.setPinsPdmRx(I2S_SCK, I2S_SD);
-
-    // Initialize the I2S bus in standard mode
-    if (!i2s.begin(I2S_MODE_PDM_RX, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
-        Serial.println("Failed to initialize I2S bus!");
-        return;
-    }
-    Serial.println("I2S bus initialized.");
+    i2s_setup();
 
     delay(100); // Stabilize hardware
 }
@@ -118,17 +143,14 @@ float calculateSFM(float* spectrum, int numBins) {
     return exp(geomMeanLog - log(arithMean)); // SFM
 }
 
-
-// Record a sample into the buffer
 void recordSample() {
-    char buffer[BUFFER_SIZE];
-    size_t bytes_read;
-
     Serial.println("Recording sample...");
 
-    // i2s_read(I2S_NUM_0, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
-
-    bytes_read = i2s.readBytes(buffer, BUFFER_SIZE);
+    esp_err_t ret = i2s_channel_read(rx_handle, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
+    if (ret != ESP_OK || bytes_read == 0) {
+        Serial.println("Failed to read I2S data in recordSample");
+        return;
+    }
 
     for (int i = 0; i < SAMPLES; i++) {
         vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
@@ -145,7 +167,6 @@ void recordSample() {
     Serial.println("Sample recorded.");
 }
 
-// Spectral Angle Mapping (returns angle in radians)
 float spectralAngle(float* spectrum1, float* spectrum2, int len) {
     float dotProduct = 0.0, norm1 = 0.0, norm2 = 0.0;
     const float epsilon = 1e-6;
@@ -167,29 +188,14 @@ float spectralAngle(float* spectrum1, float* spectrum2, int len) {
 }
 
 float gaussianWeight(float x, float lowerBound, float upperBound) {
-    // Calculate the center (mean)
     float mu = (lowerBound + upperBound) / 2.0;
-
-    // Calculate k (distance from center to bounds)
-    float k = upperBound - mu; // Assumes upperBound > lowerBound
-
-    // // Calculate sigma based on w(L) = w(U) = 0.01
-    // float sigma = k / sqrt(2.0 * 4.60517018599); // ln(0.01) = -4.605...
-
-    // Calculate sigma based on w(L) = w(U) = 0.1
+    float k = upperBound - mu;
     double sigma = k / sqrt(2.0 * 2.30258509299); // ln(0.1) = -2.302585...
-
-
-
-    // Calculate the Gaussian weight: exp(-((x - mu)^2) / (2 * sigma^2))
     float exponent = -pow(x - mu, 2) / (2.0 * pow(sigma, 2));
-    float weight = exp(exponent);
-
-    return weight;
+    return exp(exponent);
 }
 
 void loop() {
-
     // Check button press to record sample
     if (digitalRead(BUTTON_PIN) == LOW && !sampleRecorded) {
         recordSample();
@@ -197,16 +203,16 @@ void loop() {
     }
 
     // Capture audio
-    bytes_read = i2s.readBytes(buffer, BUFFER_SIZE);
-    if (bytes_read == 0) {
-        Serial.println("Failed to read I2S data");
+    esp_err_t ret = i2s_channel_read(rx_handle, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
+    if (ret != ESP_OK || bytes_read == 0) {
+        Serial.println("Failed to read I2S data!");
         return;
     }
+
     tsFft.Start();
     // Convert to float for FFT
     for (int i = 0; i < SAMPLES; i++) {
         vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
-        //vReal[i] = buffer[i] / 32768.0 * 128;  // Normalize to [-128, 127]
         vImag[i] = 0.0;
     }
 
@@ -216,10 +222,8 @@ void loop() {
     FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
     FFT.complexToMagnitude(vReal, vImag, SAMPLES);
 
-
     // Get peak frequency
     float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
-
     float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
 
     tsFft.Stop();
@@ -228,21 +232,18 @@ void loop() {
     float angle = sampleRecorded ? spectralAngle(vReal, recordedSample, NUM_BINS) : M_PI;
 
     Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
-    // Serial.printf(">slope:%f\n", slope);
     Serial.printf(">sfm:%f\n", sfm);
     Serial.printf(">sam:%f\n", angle);
     Serial.printf(">fft_time:%f\n", tsFft.Mean());
 
 #define FREQ_LOW 150
 #define FREQ_HIGH 250
-
 #define SFM_LOW 0.45
 #define SFM_HIGH 0.7
-
 #define SAM_LOW 0.7
 #define SAM_HIGH 1.0
 
-    float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW,FREQ_HIGH );
+    float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW, FREQ_HIGH);
     float sfm_weight = gaussianWeight(sfm, SFM_LOW, SFM_HIGH);
     float sam_weight = gaussianWeight(angle, SAM_LOW, SAM_HIGH);
 
@@ -257,27 +258,5 @@ void loop() {
 
     led_update(sfm * 10);
 
-    // bool p1 = (peakFreq > FREQ_LOW) && (peakFreq < FREQ_HIGH);
-    // bool p2 = (sfm > SFM_LOW) && (sfm < SFM_HIGH);
-    // bool burner = p1 && p2;
-
-    // Serial.printf(">p1:%d\n", p1);
-    // Serial.printf(">p2:%d\n", p2);
-    // Serial.printf(">p3:%d\n", burner);
-
-    // peak 150-250
-    // sfm 0.45 - 0.7
-    // // Output to Serial console
-    // Serial.printf("Peak Frequency: %.1f Hz, SFM: %.2f slope = %f", peakFreq, sfm, slope); // tsFft.Mean());
-    // // Classify based on slope
-    // if (fabs(slope) < 0.005) {
-    //     Serial.println(" - White Noise (flat)");
-    // } else if (slope < -0.01 && slope > -0.05) {
-    //     Serial.println(" - Pink Noise (~3 dB/octave)");
-    // } else if (slope < -0.05) {
-    //     Serial.println(" - Brown Noise (~6 dB/octave)");
-    // } else {
-    //     Serial.println(" - Likely Signal (variable slope)");
-    // }
     delay(1); // Control update rate
 }
