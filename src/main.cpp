@@ -1,5 +1,8 @@
 #include <Arduino.h>       // M5Unified for M5AtomS3U support
 #include <driver/i2s_pdm.h> // Modern ESP-IDF I2S PDM driver
+#include <freertos/FreeRTOS.h> // FreeRTOS for tasks
+#include <ringbuffer.hpp>
+
 #include "arduinoFFT.h"    // arduinoFFT library by kosme
 #include "TimerStats.hpp"
 #include <math.h>          // For log and exp
@@ -28,11 +31,13 @@
 #define SAMPLES 256 * 8    // FFT sample size (power of 2)
 #define BUFFER_SIZE (SAMPLES * 2) // 16-bit samples, mono
 #define NUM_BINS (SAMPLES / 2) // 128 bins (0-8 kHz)
-
 #define I2S_PORT I2S_NUM_0 // Use I2S port 0
+#define RING_BUFFER_SIZE (BUFFER_SIZE * 4) // 4x buffer size for ring buffer
 
-char buffer[BUFFER_SIZE];
-size_t bytes_read;
+// Global variables
+static i2s_chan_handle_t rx_handle = NULL; // I2S channel handle
+static espidf::RingBuffer audioRingBuffer; // Ring buffer instance
+static TaskHandle_t i2sTaskHandle = NULL; // I2S reader task handle
 
 TimerStats tsFft;
 
@@ -45,9 +50,6 @@ ArduinoFFT<float> FFT = ArduinoFFT<float>();
 float vReal[SAMPLES];
 float vImag[SAMPLES];
 float samplingPeriod = 1.0 / SAMPLE_RATE;
-
-// Global I2S channel handle
-static i2s_chan_handle_t rx_handle = NULL;
 
 #if defined(WS2812_LED_PIN)
 void setRainbowColor(float value) {
@@ -107,6 +109,26 @@ void i2s_setup() {
     Serial.println("I2S PDM RX bus initialized.");
 }
 
+// I2S reader task
+void i2sReaderTask(void *pvParameters) {
+    char i2s_buffer[BUFFER_SIZE];
+    size_t bytes_read;
+
+    while (1) {
+        esp_err_t ret = i2s_channel_read(rx_handle, i2s_buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
+        if (ret == ESP_OK && bytes_read > 0) {
+            // Send to ring buffer
+            BaseType_t sent = audioRingBuffer.send(i2s_buffer, bytes_read, pdMS_TO_TICKS(10));
+            if (!sent) {
+                Serial.println("Ring buffer full, dropping frame");
+            }
+        } else {
+            Serial.println("I2S read failed in task");
+            vTaskDelay(1); // Yield on failure
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(3000);
@@ -122,6 +144,27 @@ void setup() {
 
     Serial.println("Initializing I2S bus...");
     i2s_setup();
+
+    // Initialize ring buffer
+    audioRingBuffer.create(RING_BUFFER_SIZE, RINGBUF_TYPE_NOSPLIT);
+    if (!audioRingBuffer) { // Implicit conversion to RingbufHandle_t
+        Serial.println("Failed to create ring buffer!");
+        while (1); // Halt on failure
+    }
+
+    // Create I2S reader task
+    BaseType_t taskCreated = xTaskCreate(
+        i2sReaderTask,       // Task function
+        "I2SReader",         // Task name
+        4096,                // Stack size
+        NULL,                // Parameters
+        2,                   // Priority (higher than main loop)
+        &i2sTaskHandle       // Task handle
+    );
+    if (taskCreated != pdPASS) {
+        Serial.println("Failed to create I2S reader task!");
+        while (1); // Halt on failure
+    }
 
     delay(100); // Stabilize hardware
 }
@@ -146,25 +189,30 @@ float calculateSFM(float* spectrum, int numBins) {
 void recordSample() {
     Serial.println("Recording sample...");
 
-    esp_err_t ret = i2s_channel_read(rx_handle, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
-    if (ret != ESP_OK || bytes_read == 0) {
-        Serial.println("Failed to read I2S data in recordSample");
-        return;
+    size_t bytes_received;
+    char *data = (char *)audioRingBuffer.receive(&bytes_received, portMAX_DELAY);
+    if (data != NULL && bytes_received == BUFFER_SIZE) {
+        for (int i = 0; i < SAMPLES; i++) {
+            vReal[i] = (float)((int16_t)(data[i * 2] | (data[i * 2 + 1] << 8)));
+            vImag[i] = 0.0;
+        }
+
+        FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+        FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
+        FFT.complexToMagnitude(vReal, vImag, SAMPLES);
+
+        memcpy(recordedSample, vReal, NUM_BINS * sizeof(float));
+        sampleRecorded = true;
+
+        Serial.println("Sample recorded.");
+    } else {
+        Serial.println("Failed to receive sample from ring buffer");
     }
 
-    for (int i = 0; i < SAMPLES; i++) {
-        vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
-        vImag[i] = 0.0;
+    // Return the buffer
+    if (data != NULL) {
+        audioRingBuffer.return_item(data);
     }
-
-    FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-    FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
-    FFT.complexToMagnitude(vReal, vImag, SAMPLES);
-
-    memcpy(recordedSample, vReal, NUM_BINS * sizeof(float));
-    sampleRecorded = true;
-
-    Serial.println("Sample recorded.");
 }
 
 float spectralAngle(float* spectrum1, float* spectrum2, int len) {
@@ -202,39 +250,36 @@ void loop() {
         delay(100); // Debounce
     }
 
-    // Capture audio
-    esp_err_t ret = i2s_channel_read(rx_handle, buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
-    if (ret != ESP_OK || bytes_read == 0) {
-        Serial.println("Failed to read I2S data!");
-        return;
-    }
+    // Capture audio from ring buffer
+    size_t bytes_received;
+    char *data = (char *)audioRingBuffer.receive(&bytes_received, pdMS_TO_TICKS(10));
+    if (data != NULL && bytes_received == BUFFER_SIZE) {
+        tsFft.Start();
+        // Convert to float for FFT
+        for (int i = 0; i < SAMPLES; i++) {
+            vReal[i] = (float)((int16_t)(data[i * 2] | (data[i * 2 + 1] << 8)));
+            vImag[i] = 0.0;
+        }
 
-    tsFft.Start();
-    // Convert to float for FFT
-    for (int i = 0; i < SAMPLES; i++) {
-        vReal[i] = (float)((int16_t)(buffer[i * 2] | (buffer[i * 2 + 1] << 8)));
-        vImag[i] = 0.0;
-    }
+        // Perform FFT
+        FFT.dcRemoval();
+        FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+        FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
+        FFT.complexToMagnitude(vReal, vImag, SAMPLES);
 
-    // Perform FFT
-    FFT.dcRemoval();
-    FFT.windowing(vReal, SAMPLES, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-    FFT.compute(vReal, vImag, SAMPLES, FFT_FORWARD);
-    FFT.complexToMagnitude(vReal, vImag, SAMPLES);
+        // Get peak frequency
+        float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
+        float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
 
-    // Get peak frequency
-    float peakFreq = FFT.majorPeak(vReal, SAMPLES, SAMPLE_RATE);
-    float sfm = calculateSFM(vReal, SAMPLES / 2); // Use first half (0-8 kHz)
+        tsFft.Stop();
 
-    tsFft.Stop();
+        // SAM comparison with recorded sample (if available)
+        float angle = sampleRecorded ? spectralAngle(vReal, recordedSample, NUM_BINS) : M_PI;
 
-    // SAM comparison with recorded sample (if available)
-    float angle = sampleRecorded ? spectralAngle(vReal, recordedSample, NUM_BINS) : M_PI;
-
-    Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
-    Serial.printf(">sfm:%f\n", sfm);
-    Serial.printf(">sam:%f\n", angle);
-    Serial.printf(">fft_time:%f\n", tsFft.Mean());
+        Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
+        Serial.printf(">sfm:%f\n", sfm);
+        Serial.printf(">sam:%f\n", angle);
+        Serial.printf(">fft_time:%f\n", tsFft.Mean());
 
 #define FREQ_LOW 150
 #define FREQ_HIGH 250
@@ -243,20 +288,25 @@ void loop() {
 #define SAM_LOW 0.7
 #define SAM_HIGH 1.0
 
-    float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW, FREQ_HIGH);
-    float sfm_weight = gaussianWeight(sfm, SFM_LOW, SFM_HIGH);
-    float sam_weight = gaussianWeight(angle, SAM_LOW, SAM_HIGH);
+        float peak_freq_weight = gaussianWeight(peakFreq, FREQ_LOW, FREQ_HIGH);
+        float sfm_weight = gaussianWeight(sfm, SFM_LOW, SFM_HIGH);
+        float sam_weight = gaussianWeight(angle, SAM_LOW, SAM_HIGH);
 
-    float weight_product = peak_freq_weight * sfm_weight * sam_weight;
-    float weight_sum = peak_freq_weight + sfm_weight + sam_weight;
+        float weight_product = peak_freq_weight * sfm_weight * sam_weight;
+        float weight_sum = peak_freq_weight + sfm_weight + sam_weight;
 
-    Serial.printf(">peak_freq_weight:%f\n", peak_freq_weight);
-    Serial.printf(">sfm_weight:%f\n", sfm_weight);
-    Serial.printf(">sam_weight:%f\n", sam_weight);
-    Serial.printf(">weight_product:%f\n", weight_product);
-    Serial.printf(">weight_sum:%f\n", weight_sum);
+        Serial.printf(">peak_freq_weight:%f\n", peak_freq_weight);
+        Serial.printf(">sfm_weight:%f\n", sfm_weight);
+        Serial.printf(">sam_weight:%f\n", sam_weight);
+        Serial.printf(">weight_product:%f\n", weight_product);
+        Serial.printf(">weight_sum:%f\n", weight_sum);
 
-    led_update(sfm * 10);
+        led_update(sfm * 10);
 
-    delay(1); // Control update rate
+        // Return the buffer
+        audioRingBuffer.return_item(data);
+    } else {
+        // No data available, skip processing
+        delay(1); // Prevent tight loop
+    }
 }
