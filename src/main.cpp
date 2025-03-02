@@ -285,9 +285,17 @@ void loop() {
         // SAM comparison with recorded sample (if available)
         float angle = sampleRecorded ? spectralAngle(vReal, recordedSample, NUM_BINS) : M_PI;
 
+        // Calculate RMS "volume"
+        double sum = 0;
+        for (int i = 1; i < SAMPLES / 2; i++) { // Skip DC (bin 0), use up to Nyquist
+            sum += vReal[i] * vReal[i];          // Square the magnitude
+        }
+        double rms = sqrt(sum / (SAMPLES / 2)); // RMS calculation
+
         Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
         Serial.printf(">sfm:%f\n", sfm);
         Serial.printf(">sam:%f\n", angle);
+        Serial.printf(">rms:%f\n", rms);
         Serial.printf(">fft_time:%f\n", tsFft.Mean());
 
 #define FREQ_LOW 150
