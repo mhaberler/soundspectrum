@@ -11,17 +11,17 @@ class RingBuffer {
 
   public:
 
-    void create(size_t sz, RingbufferType_t type, UBaseType_t cap = MALLOC_CAP_INTERNAL) {
+    void create(size_t sz, RingbufferType_t type, UBaseType_t cap = (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 1)
         h =  xRingbufferCreateWithCaps(sz, type, cap); // >=5.2.1
 #else
         h = xRingbufferCreate(sz, type);
 #endif
-        }
+    }
 
-        void create(size_t sz, RingbufferType_t type,
-                    uint8_t* pucRingbufferStorage,
-                    StaticRingbuffer_t* pxStaticRingbuffer) {
+    void create(size_t sz, RingbufferType_t type,
+                uint8_t* pucRingbufferStorage,
+                StaticRingbuffer_t* pxStaticRingbuffer) {
         h = xRingbufferCreateStatic(sz, type, pucRingbufferStorage, pxStaticRingbuffer);
     }
 
