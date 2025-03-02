@@ -51,6 +51,9 @@ float vReal[SAMPLES];
 float vImag[SAMPLES];
 float samplingPeriod = 1.0 / SAMPLE_RATE;
 
+// queue error counters
+uint32_t queue_full, acquire_fail;
+
 #if defined(WS2812_LED_PIN)
 void setRainbowColor(float value) {
     uint8_t hue = map(value * 100, 0, 300, 0, 255); // Scale 0-3 to 0-255 hue
@@ -111,20 +114,26 @@ void i2s_setup() {
 
 // I2S reader task
 void i2sReaderTask(void *pvParameters) {
-    char i2s_buffer[BUFFER_SIZE];
     size_t bytes_read;
+    uint8_t *i2s_buffer;
 
     while (1) {
+        if (audioRingBuffer.send_acquire((void **)&i2s_buffer, BUFFER_SIZE, 0) != pdTRUE) {
+            acquire_fail++;
+            log_e("Failed to acquire queue item");
+            return;
+        }
         esp_err_t ret = i2s_channel_read(rx_handle, i2s_buffer, BUFFER_SIZE, &bytes_read, portMAX_DELAY);
         if (ret == ESP_OK && bytes_read > 0) {
             // Send to ring buffer
-            BaseType_t sent = audioRingBuffer.send(i2s_buffer, bytes_read, pdMS_TO_TICKS(10));
-            if (!sent) {
-                Serial.println("Ring buffer full, dropping frame");
+            BaseType_t sent =  audioRingBuffer.send_complete(i2s_buffer);
+            if (sent != pdTRUE) {
+                queue_full++;
+                log_e("Failed to send queue item");
             }
         } else {
-            Serial.println("I2S read failed in task");
-            vTaskDelay(1); // Yield on failure
+            log_e("I2S read failed in task: ret=%d bytes_read=%u", ret, bytes_read);
+            vTaskDelay(1);
         }
     }
 }
@@ -154,13 +163,13 @@ void setup() {
 
     // Create I2S reader task
     BaseType_t taskCreated = xTaskCreate(
-        i2sReaderTask,       // Task function
-        "I2SReader",         // Task name
-        4096,                // Stack size
-        NULL,                // Parameters
-        2,                   // Priority (higher than main loop)
-        &i2sTaskHandle       // Task handle
-    );
+                                 i2sReaderTask,       // Task function
+                                 "I2SReader",         // Task name
+                                 4096,                // Stack size
+                                 NULL,                // Parameters
+                                 2,                   // Priority (higher than main loop)
+                                 &i2sTaskHandle       // Task handle
+                             );
     if (taskCreated != pdPASS) {
         Serial.println("Failed to create I2S reader task!");
         while (1); // Halt on failure
@@ -245,7 +254,7 @@ float gaussianWeight(float x, float lowerBound, float upperBound) {
 
 void loop() {
     // Check button press to record sample
-    if (digitalRead(BUTTON_PIN) == LOW && !sampleRecorded) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
         recordSample();
         delay(100); // Debounce
     }
