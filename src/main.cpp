@@ -21,6 +21,12 @@
     #define I2S_SCK GPIO_NUM_0  // Bit Clock (BCLK)
     #define BUTTON_PIN GPIO_NUM_37
 #endif
+
+#if defined(ARDUINO_M5STACK_Core2)
+    #define I2S_SD  GPIO_NUM_34 // Data (DOUT from codec)
+    #define I2S_SCK GPIO_NUM_0  // Bit Clock (BCLK)
+#endif
+
 #if defined(ARDUINO_ATOMS3U)
     #define I2S_SD  GPIO_NUM_38 // Data (DOUT from codec)
     #define I2S_SCK GPIO_NUM_39 // Bit Clock (BCLK)
@@ -147,8 +153,14 @@ void setup() {
     log_w("ESP-IDF Version: %d.%d.%d", ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH);
 
     // Initialize button
+#if defined(BUTTON_PIN)
     pinMode(BUTTON_PIN, INPUT_PULLUP); // Active LOW on M5Stick-C
+#endif
 
+#if defined(PLAIN_LED_PIN)
+    pinMode(PLAIN_LED_PIN, OUTPUT); // Active LOW on M5Stick-C
+    digitalWrite(PLAIN_LED_PIN, HIGH); // Ensure LED is OFF at start (active-low)
+#endif
     led_setup();
 
     Serial.println("Initializing I2S bus...");
@@ -254,16 +266,20 @@ float gaussianWeight(float x, float lowerBound, float upperBound) {
 
 void loop() {
     // Check button press to record sample
+#if defined(BUTTON_PIN)
     if (digitalRead(BUTTON_PIN) == LOW) {
         recordSample();
         delay(100); // Debounce
     }
-
+#endif
     // Capture audio from ring buffer
     size_t bytes_received;
     char *data = (char *)audioRingBuffer.receive(&bytes_received, pdMS_TO_TICKS(10));
     if (data != NULL && bytes_received == BUFFER_SIZE) {
         tsFft.Start();
+#if defined(PLAIN_LED_PIN)
+        digitalWrite(PLAIN_LED_PIN, LOW); // Active LOW on M5Stick-C
+#endif
         // Convert to float for FFT
         for (int i = 0; i < SAMPLES; i++) {
             vReal[i] = (float)((int16_t)(data[i * 2] | (data[i * 2 + 1] << 8)));
@@ -291,7 +307,9 @@ void loop() {
             sum += vReal[i] * vReal[i];          // Square the magnitude
         }
         double rms = sqrt(sum / (SAMPLES / 2)); // RMS calculation
-
+#if defined(PLAIN_LED_PIN)
+        digitalWrite(PLAIN_LED_PIN, HIGH); // Active LOW on M5Stick-C
+#endif
         Serial.printf(">peak_freq:%.1f§Hz\n", peakFreq);
         Serial.printf(">sfm:%f\n", sfm);
         Serial.printf(">sam:%f\n", angle);
